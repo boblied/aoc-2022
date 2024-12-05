@@ -1,0 +1,17 @@
+Recursive descent parser, straight-forward part 1. No math rules like * before +,
+so the evaluation is really simple.
+
+For part two, evaluate both terms in the root equation, select the one that has an answer.
+Try to use back-propagation to make the other term equal to it.
+
+Sounds obvious, but no joy.
+
+Can't find the problem with this back-propagation method.  The answer appears to be
+a very large number, on the order of 1e14.
+
+Plan B:
+
+Take a huge range (like 1e10 to 1e16) and plug in the values for humn.
+Evaluate in 10 steps, find the interval where the answer goes from negative to positive
+-- it must cross zero somewhere in that interval.
+Divide the new interval into 10 steps and repeat until we find the zero.
