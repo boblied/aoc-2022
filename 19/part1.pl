@@ -17,13 +17,14 @@ use lib ".";
 use Blueprint;
 use Factory;
 
+my $Minutes = 24;
+my $Debug = 0;
+GetOptions("minutes=i" => \$Minutes, "debug" => \$Debug);
+
 Log::Log4perl->easy_init({
-    level   => $INFO,
+    level   => ($Debug ? $DEBUG : $INFO),
     layout  => '%-5p %m%n'
 });
-
-my $Minutes = 24;
-GetOptions("minutes=i" => \$Minutes);
 
 INFO "Minutes = $Minutes";
 

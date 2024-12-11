@@ -45,66 +45,128 @@ sub show($self)
 
 sub worthBuilding($self, $r, $resource, $robot)
 {
-    state @maxNeeded = (0,0,0);
-    if ( $maxNeeded[0] == 0 )
-    {
-        my $bp = $self->blueprint;
-        for my $r ( ORE, CLAY, OBSIDIAN, GEODE )
-        {
-            my ($ore, $clay, $obsidian) = $self->blueprint->getCost($r);
-            $maxNeeded[ORE]      = $ore      if $ore > $maxNeeded[ORE];
-            $maxNeeded[CLAY]     = $clay     if $clay > $maxNeeded[CLAY];
-            $maxNeeded[OBSIDIAN] = $obsidian if $ore > $maxNeeded[OBSIDIAN];
-        }
-    }
     # A geode robot is always worth building
-    return $r == GEODE || $robot->[$r] < $maxNeeded[$r];
+    return 1 if $r == GEODE;
+    return $robot->[$r] < $self->blueprint->maxNeededFor($r);
 }
 
-sub _run($self, $blueprint, $minutes, $resource, $robot, $indent)
+my %cache;
+sub _run($self, $blueprint, $minutes, $goalRobot, $resource, $robot, $indent)
 {
+    state $called++;
     return if ( $minutes == 0 );
 
-    # If there isn't enough time to improve, bail now.
-    return if ( $minutes <= $blueprint->maxGeode );
+    my $state = join(' ', $minutes, $goalRobot, $resource->@*, $robot->@*);
+    DEBUG "${indent}State: $state";
+    if ( $cache{$state}++ )
+    {
+        DEBUG "${indent}Cache hit $state";
+        return;
+    }
 
-    DEBUG showState($blueprint->id, $resource, $robot, $indent);
+    # DEBUG showState($blueprint->id, $resource, $robot, $indent);
 
-    my $s = "[$resource->@*][$robot->@*] --> ";
+    my $goalName = resourceName($goalRobot);
+    my $s = "Goal $goalName: [$resource->@*][$robot->@*] m-> ";
     _mine($resource, $robot);
-    $s .= "[$resource->@*][$robot->@*] --> ";
-    if ( $resource->[GEODE] > $blueprint->maxGeode )
+    $s .= "[$resource->@*][$robot->@*] b-> ";
+
+    $blueprint->isNewMax($resource->[GEODE]);
+
+    # There is no point in trying to build anything but a geode for the last minute
+    # and no point in building anything in the last minute.
+    if ( $minutes == 1 )
     {
-        $blueprint->maxGeode($resource->[GEODE]);
-        INFO "New geode max for ", $blueprint->id,": ", $resource->[GEODE];
+        DEBUG "${indent}Stop at minute 1, goal $goalName";
+        return;
+    }
+    elsif ( $minutes == 2 )
+    {
+        DEBUG "${indent}Minute 2, give up on $goalName";
+        _mine($resource, $robot);
+        $blueprint->isNewMax($resource->[GEODE]);
+        return;
     }
 
-    my @candidate = $blueprint->canMake($resource->@*);
-    INFO "${indent}AT min=$minutes, [$resource->@*] can make robots: @candidate";
-
-    @candidate = grep { $self->worthBuilding($_, $resource, $robot) } @candidate;
-
-    # Now try each possible robot
-    for my $r ( @candidate )
+    # The best we can possibly do is to add another geode robot
+    # every time.  If the max is already greater than that, we can stop.
+    # Adding a robot every minute is Sum(n) = n(n+1)/2, but it's n-1
+    my $bestPossible = $resource->[GEODE] + ($robot->[GEODE]*$minutes)
+                     + ($minutes*($minutes-1)/2 );
+    if ( $blueprint->maxGeode > $bestPossible )
     {
-        my $res = [ $resource->@*];
-        my $rob = [ $robot->@* ];
-        _makeRobot($res, $rob, $r, $blueprint->getCost($r) );
-        INFO "${indent}Made robot $r $s", "[$res->@*][$rob->@*]";
-        $self->_run($blueprint, $minutes-1, $res, $rob, "  $indent");
+        DEBUG "${indent}At min=$minutes, can't beat best, bailing";
+        return;
     }
 
-    # Also try without making a robot, just hoarding resources
+    # If we have enough robots to make a geode robot every time,
+    # then we're going to do that. We can calculate how many that's
+    # going to be and stop the recursion.
+    my @geodeCost = $blueprint->getCost(GEODE);
+    if (   $robot->[CLAY] >= $geodeCost[CLAY]
+        && $robot->[OBSIDIAN] >= $geodeCost[OBSIDIAN] )
     {
-        my $res = [ $resource->@*];
-        my $rob = [ $robot->@* ];
-        $self->_run($blueprint, $minutes-1, $res, $rob, "  $indent");
+        $resource->[GEODE] += ($robot->[GEODE]*$minutes) + ($minutes*($minutes-1)/2 );
+        $blueprint->isNewMax($resource->[GEODE]);
+        INFO "${indent}At min=$minutes, Geode bailout";
+        return;
+    }
+    if ( $self->worthBuilding($goalRobot, $resource, $robot) )
+    {
+        while ( ! $blueprint->canMake($goalRobot, $resource->@* ) )
+        {
+            # Mine for enough cycles to produce a robot
+            my $m = "min=$minutes, mining for $goalName [$resource->@*][$robot->@*] M-> ";
+            _mine($resource, $robot);
+            DEBUG "$m [$resource->@*][$robot->@*]";
+            $minutes--;
+            if ( $minutes == 0 )
+            {
+                # We didn't make the goal robot, but maybe we made some
+                # geodes as a side effect of mining.
+                $blueprint->isNewMax($resource->[GEODE]);
+                DEBUG "${indent}Timed out mining for $goalName";
+                return;
+            }
+        }
+        _makeRobot($resource, $robot, $goalRobot, $blueprint->getCost($goalRobot) );
+        DEBUG "${indent}min=$minutes Built $s", "[$resource->@*][$robot->@*]";
+    }
+
+    # Set a new goal.
+    # Everybody needs ore, so that's worth considering,
+    # and we need clay as a precursur to obsidian and then geodes.
+    # But don't try to create new robot types if we've reached the maximum that
+    # would mine enough to build a new robot every cycle.
+    if ( $self->worthBuilding(ORE, $resource, $robot) )
+    {
+        $self->_run($blueprint, $minutes-1, ORE, [$resource->@*], [$robot->@*], "  $indent");
+    }
+    if ( $self->worthBuilding(CLAY, $resource, $robot) )
+    {
+        $self->_run($blueprint, $minutes-1, CLAY, [$resource->@*], [$robot->@*], "  $indent");
+    }
+    # It's only worth considering obsidian if we have at least one clay robot and
+    # could profit from making more.
+    if ( $robot->[CLAY] > 0  &&  $self->worthBuilding(OBSIDIAN, $resource, $robot) )
+    {
+        $self->_run($blueprint, $minutes-1, OBSIDIAN, [$resource->@*], [$robot->@*], "  $indent");
+    }
+    # It's only worth considering geode if we have the ability to make obsidian.
+    if ( $robot->[OBSIDIAN] > 0 )
+    {
+        $self->_run($blueprint, $minutes-1, GEODE, [$resource->@*], [$robot->@*], "  $indent");
     }
 }
 
 sub run($self, $minutes)
 {
-    $self->_run($self->blueprint, $minutes, [$self->resource->@*], [$self->robot->@*], "");
+    # Initially we only have an ORE robot, so the only things
+    # we can try for are ORE and CLAY robots
+    for my $goalRobot ( ORE, CLAY )
+    {
+        $self->_run($self->blueprint, $minutes, $goalRobot, [ 0, 0, 0, 0], [1, 0, 0, 0], "");
+    }
 }
 
 sub _makeRobot($resource, $robot, $type, $ore, $clay, $obsidian)
@@ -115,6 +177,5 @@ sub _makeRobot($resource, $robot, $type, $ore, $clay, $obsidian)
 
     $robot->[$type]++;
 }
-
 
 1;
